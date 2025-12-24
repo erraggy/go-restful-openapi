@@ -1,14 +1,21 @@
 package restfulspec
 
 import (
+	"log"
+
 	restful "github.com/emicklei/go-restful/v3"
+	"github.com/erraggy/oastools/parser"
 	"github.com/go-openapi/spec"
 )
 
 // NewOpenAPIService returns a new WebService that provides the API documentation of all services
 // conforming to the OpenAPI documentation specification.
+//
+// The builder used depends on config.OASVersion:
+//   - OASVersion >= OASVersion300: Uses BuildOAS3 (oastools library, OAS 3.x output)
+//   - OASVersion == OASVersion20: Uses BuildOAS2 (oastools library, OAS 2.0 output)
+//   - OASVersion unset (zero): Uses BuildSwagger (legacy go-openapi/spec, OAS 2.0 output)
 func NewOpenAPIService(config Config) *restful.WebService {
-
 	ws := new(restful.WebService)
 	ws.Path(config.APIPath)
 	ws.Produces(restful.MIME_JSON)
@@ -16,9 +23,30 @@ func NewOpenAPIService(config Config) *restful.WebService {
 		ws.Filter(enableCORS)
 	}
 
-	swagger := BuildSwagger(config)
-	resource := specResource{swagger: swagger}
-	ws.Route(ws.GET("/").To(resource.getSwagger))
+	// Build the appropriate document based on OASVersion
+	var doc any
+	switch {
+	case config.OASVersion >= parser.OASVersion300:
+		d, err := BuildOAS3(config)
+		if err != nil {
+			log.Printf("restfulspec: failed to build OAS 3.x document: %v", err)
+			return ws
+		}
+		doc = d
+	case config.OASVersion == parser.OASVersion20:
+		d, err := BuildOAS2(config)
+		if err != nil {
+			log.Printf("restfulspec: failed to build OAS 2.0 document: %v", err)
+			return ws
+		}
+		doc = d
+	default:
+		doc = BuildSwagger(config)
+	}
+
+	ws.Route(ws.GET("/").To(func(req *restful.Request, resp *restful.Response) {
+		_ = resp.WriteAsJson(doc)
+	}))
 	return ws
 }
 
@@ -66,13 +94,4 @@ func enableCORS(req *restful.Request, resp *restful.Response, chain *restful.Fil
 		}
 	}
 	chain.ProcessFilter(req, resp)
-}
-
-// specResource is a REST resource to serve the Open-API spec.
-type specResource struct {
-	swagger *spec.Swagger
-}
-
-func (s specResource) getSwagger(req *restful.Request, resp *restful.Response) {
-	_ = resp.WriteAsJson(s.swagger)
 }
