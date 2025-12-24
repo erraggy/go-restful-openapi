@@ -428,3 +428,231 @@ func keysOf(m map[string]*parser.Schema) []string {
 	}
 	return keys
 }
+
+func TestBuildOAS3_WithOASVersion20_ReturnsError(t *testing.T) {
+	ws := new(restful.WebService)
+	ws.Path("/api")
+	ws.Route(ws.GET("/health").To(dummyHandler))
+
+	config := Config{
+		WebServices: []*restful.WebService{ws},
+		OASVersion:  OASVersion20, // Explicitly set OAS 2.0
+	}
+
+	_, err := BuildOAS3(config)
+	if err == nil {
+		t.Error("Expected error when calling BuildOAS3 with OASVersion20")
+	}
+}
+
+func TestBuildOAS2_DefaultResponse(t *testing.T) {
+	ws := new(restful.WebService)
+	ws.Path("/api")
+
+	type ErrorResponse struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+
+	ws.Route(ws.GET("/test").To(dummyHandler).
+		Operation("testDefaultResponse").
+		DefaultReturns("Unexpected error", ErrorResponse{}))
+
+	config := Config{
+		WebServices: []*restful.WebService{ws},
+	}
+
+	doc, err := BuildOAS2(config)
+	if err != nil {
+		t.Fatalf("BuildOAS2 failed: %v", err)
+	}
+
+	op := doc.Paths["/api/test"].Get
+	if op == nil {
+		t.Fatal("Expected GET operation")
+	}
+
+	// Check that default response exists
+	if op.Responses == nil || op.Responses.Default == nil {
+		t.Fatal("Expected default response")
+	}
+
+	if op.Responses.Default.Description != "Unexpected error" {
+		t.Errorf("Expected description 'Unexpected error', got '%s'", op.Responses.Default.Description)
+	}
+}
+
+func TestBuildOAS2_HeaderParameter(t *testing.T) {
+	ws := new(restful.WebService)
+	ws.Path("/api")
+	ws.Route(ws.GET("/test").To(dummyHandler).
+		Operation("testHeaderParam").
+		Param(ws.HeaderParameter("X-Request-ID", "Request tracking ID").DataType("string").Required(true)).
+		Returns(http.StatusOK, "OK", nil))
+
+	config := Config{
+		WebServices: []*restful.WebService{ws},
+	}
+
+	doc, err := BuildOAS2(config)
+	if err != nil {
+		t.Fatalf("BuildOAS2 failed: %v", err)
+	}
+
+	op := doc.Paths["/api/test"].Get
+	if op == nil {
+		t.Fatal("Expected GET operation")
+	}
+
+	if len(op.Parameters) != 1 {
+		t.Fatalf("Expected 1 parameter, got %d", len(op.Parameters))
+	}
+
+	param := op.Parameters[0]
+	if param.In != "header" {
+		t.Errorf("Expected header parameter, got %s", param.In)
+	}
+	if param.Name != "X-Request-ID" {
+		t.Errorf("Expected param name 'X-Request-ID', got '%s'", param.Name)
+	}
+	if !param.Required {
+		t.Error("Expected parameter to be required")
+	}
+}
+
+func TestBuildOAS2_FormParameter(t *testing.T) {
+	ws := new(restful.WebService)
+	ws.Path("/api")
+	ws.Route(ws.POST("/upload").To(dummyHandler).
+		Operation("testFormParam").
+		Consumes("application/x-www-form-urlencoded").
+		Param(ws.FormParameter("filename", "File name").DataType("string")).
+		Returns(http.StatusOK, "OK", nil))
+
+	config := Config{
+		WebServices: []*restful.WebService{ws},
+	}
+
+	doc, err := BuildOAS2(config)
+	if err != nil {
+		t.Fatalf("BuildOAS2 failed: %v", err)
+	}
+
+	op := doc.Paths["/api/upload"].Post
+	if op == nil {
+		t.Fatal("Expected POST operation")
+	}
+
+	if len(op.Parameters) != 1 {
+		t.Fatalf("Expected 1 parameter, got %d", len(op.Parameters))
+	}
+
+	param := op.Parameters[0]
+	if param.In != "formData" {
+		t.Errorf("Expected formData parameter, got %s", param.In)
+	}
+}
+
+func TestGetTypeForDataType_AllTypes(t *testing.T) {
+	testCases := []struct {
+		dataType string
+		expected any
+	}{
+		{"string", ""},
+		{"integer", int(0)},
+		{"int", int(0)},
+		{"int32", int32(0)},
+		{"int64", int64(0)},
+		{"number", float64(0)},
+		{"float64", float64(0)},
+		{"float32", float32(0)},
+		{"boolean", false},
+		{"bool", false},
+		{"file", nil},
+		{"", ""}, // Empty defaults to string silently
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.dataType, func(t *testing.T) {
+			result := getTypeForDataType(tc.dataType)
+			if result != tc.expected {
+				t.Errorf("getTypeForDataType(%q) = %T(%v), expected %T(%v)",
+					tc.dataType, result, result, tc.expected, tc.expected)
+			}
+		})
+	}
+}
+
+func TestConfigValidate(t *testing.T) {
+	t.Run("empty WebServices returns error", func(t *testing.T) {
+		config := Config{}
+		err := config.Validate()
+		if err == nil {
+			t.Error("Expected error for empty WebServices")
+		}
+	})
+
+	t.Run("nil WebService in slice returns error", func(t *testing.T) {
+		config := Config{
+			WebServices: []*restful.WebService{nil},
+		}
+		err := config.Validate()
+		if err == nil {
+			t.Error("Expected error for nil WebService")
+		}
+	})
+
+	t.Run("valid config returns nil", func(t *testing.T) {
+		ws := new(restful.WebService)
+		ws.Path("/api")
+		config := Config{
+			WebServices: []*restful.WebService{ws},
+		}
+		err := config.Validate()
+		if err != nil {
+			t.Errorf("Unexpected error: %v", err)
+		}
+	})
+}
+
+func TestBuildOAS2_ParameterWithConstraints(t *testing.T) {
+	ws := new(restful.WebService)
+	ws.Path("/api")
+
+	minVal := float64(1)
+	maxVal := float64(100)
+	ws.Route(ws.GET("/test").To(dummyHandler).
+		Operation("testParamConstraints").
+		Param(ws.QueryParameter("limit", "Limit results").
+			DataType("integer").
+			Minimum(minVal).
+			Maximum(maxVal).
+			DefaultValue("10")).
+		Returns(http.StatusOK, "OK", nil))
+
+	config := Config{
+		WebServices: []*restful.WebService{ws},
+	}
+
+	doc, err := BuildOAS2(config)
+	if err != nil {
+		t.Fatalf("BuildOAS2 failed: %v", err)
+	}
+
+	op := doc.Paths["/api/test"].Get
+	if op == nil {
+		t.Fatal("Expected GET operation")
+	}
+
+	if len(op.Parameters) != 1 {
+		t.Fatalf("Expected 1 parameter, got %d", len(op.Parameters))
+	}
+
+	param := op.Parameters[0]
+	if param.Minimum == nil || *param.Minimum != 1 {
+		t.Errorf("Expected minimum 1, got %v", param.Minimum)
+	}
+	if param.Maximum == nil || *param.Maximum != 100 {
+		t.Errorf("Expected maximum 100, got %v", param.Maximum)
+	}
+}
